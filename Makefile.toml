@@ -1,0 +1,22 @@
+[tasks.build]
+description = "Build the project in release mode"
+command = "cargo"
+args = ["build", "--release"]
+
+[tasks.convert]
+description = "Convert ELF to UF2"
+command = "elf2uf2-rs"
+args = ["./target/thumbv6m-none-eabi/release/ledclock"]
+
+[tasks.copy]
+description = "Copy UF2 file to E:\\"
+command = "cp"
+args = ["./target/thumbv6m-none-eabi/release/ledclock.uf2", "E:/"]
+
+[tasks.install-elf2uf2-rs]
+description = "Install elf2uf2-rs if not already installed"
+install_crate = { crate_name = "elf2uf2-rs", binary = "elf2uf2-rs" }
+
+[tasks.post-build]
+description = "Build, convert, and copy"
+dependencies = ["install-elf2uf2-rs", "build", "convert", "copy"]
