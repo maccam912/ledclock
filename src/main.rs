@@ -28,7 +28,7 @@ use embassy_sync::{
     blocking_mutex::raw::ThreadModeRawMutex,
     channel::{Channel, Receiver},
 };
-use embassy_time::{Duration, Ticker, Timer};
+use embassy_time::{Duration, Timer};
 use fixed::types::U24F8;
 use fixed_macro::fixed;
 use log::{error, info};
