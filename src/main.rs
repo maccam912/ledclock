@@ -12,8 +12,9 @@ use embassy_net::{
     tcp::client::{TcpClient, TcpClientState},
 };
 use embassy_rp::{
-    bind_interrupts, clocks::{self, RoscRng}, dma::{AnyChannel, Channel}, into_ref, peripherals::{DMA_CH1, PIO1}, pio::{Common, Config, FifoJoin, Instance, InterruptHandler, Pio, PioPin, ShiftConfig, ShiftDirection, StateMachine}, rtc::{DayOfWeek, Rtc}, Peripheral, PeripheralRef
+    bind_interrupts, clocks::{self, RoscRng}, dma::{AnyChannel, Channel as DmaChannel}, into_ref, peripherals::{DMA_CH1, PIO1}, pio::{Common, Config, FifoJoin, Instance, InterruptHandler, Pio, PioPin, ShiftConfig, ShiftDirection, StateMachine}, rtc::{DayOfWeek, Rtc}, Peripheral, PeripheralRef
 };
+use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::{Channel, Receiver}};
 use embassy_time::{Duration, Timer, Ticker};
 use fixed::types::U24F8;
 use fixed_macro::fixed;
@@ -34,6 +35,8 @@ mod wifi;
 const WIFI_NETWORK: &str = "Bill Wi the Science Fi";
 const WIFI_PASSWORD: &str = "sciencerules";
 const NUM_LEDS: usize = 144;
+const GLOBAL_BRIGHTNESS: f32 = 0.1;
+static CHANNEL: Channel<ThreadModeRawMutex, f32, 4> = Channel::new();
 
 bind_interrupts!(struct Irqs {
     PIO1_IRQ_0 => InterruptHandler<PIO1>;
@@ -48,7 +51,7 @@ impl<'d, P: Instance, const S: usize, const N: usize> Ws2812<'d, P, S, N> {
     pub fn new(
         pio: &mut Common<'d, P>,
         mut sm: StateMachine<'d, P, S>,
-        dma: impl Peripheral<P = impl Channel> + 'd,
+        dma: impl Peripheral<P = impl DmaChannel> + 'd,
         pin: impl PioPin,
     ) -> Self {
         into_ref!(dma);
@@ -170,7 +173,7 @@ async fn main(spawner: Spawner) {
     let seed = rng.next_u64();
     let mut rtc = Rtc::new(p.RTC);
 
-    spawner.spawn(ws2812_task(p.PIO1, p.DMA_CH1, p.PIN_4)).unwrap();
+    spawner.spawn(ws2812_task(p.PIO1, p.DMA_CH1, p.PIN_4, CHANNEL.receiver())).unwrap();
 
     loop {
         let mut rx_buffer = [0; 8192];
@@ -275,24 +278,52 @@ async fn main(spawner: Spawner) {
                 current_time.minute,
                 current_time.second
             );
+            let time_fraction = calculate_time_fraction(current_time);
+            CHANNEL.send(time_fraction).await;
             Timer::after(Duration::from_secs(1)).await;
         }
     }
 }
 
+fn calculate_time_fraction(current_time: embassy_rp::rtc::DateTime) -> f32 {
+    const SECONDS_IN_A_DAY: u32 = 86400; // 24 * 60 * 60
+    const TIME_SCALE: u32 = 1;
+
+    let seconds_since_midnight = (current_time.hour as u32 * 3600) +
+                                 (current_time.minute as u32 * 60) +
+                                 (current_time.second as u32);
+    let fraction_of_day = seconds_since_midnight as f32 / SECONDS_IN_A_DAY as f32;
+    
+    (fraction_of_day * TIME_SCALE as f32) % 1.0
+}
+
+
 #[embassy_executor::task]
-async fn ws2812_task(pio: PIO1, dma: DMA_CH1, pin: impl PioPin) {
+async fn ws2812_task(pio: PIO1, dma: DMA_CH1, pin: impl PioPin, time_scale_receiver: Receiver<'static, ThreadModeRawMutex, f32, 4>) {
     let Pio { mut common, sm0, .. } = Pio::new(pio, Irqs);
     let mut data = [RGB8::default(); NUM_LEDS];
     let mut ws2812 = Ws2812::new(&mut common, sm0, dma, pin);
-    let mut ticker = Ticker::every(Duration::from_millis(100));
     loop {
-        for j in 0..(256 * 5) {
-            for i in 0..NUM_LEDS {
-                data[i] = wheel((((i * 256) as u16 / NUM_LEDS as u16 + j as u16) & 255) as u8);
-            }
-            ws2812.write(&data).await;
-            ticker.next().await;
+        let time_scale = time_scale_receiver.receive().await;
+        let led_index = (time_scale * NUM_LEDS as f32) % NUM_LEDS as f32;
+        let lower_led = (led_index as usize) % NUM_LEDS; // Use integer cast instead of floor
+        let upper_led = (lower_led + 1) % NUM_LEDS;
+        let fraction = led_index - (lower_led as f32); // Calculate the fractional part
+
+        // Reset all LEDs
+        for led in data.iter_mut() {
+            *led = RGB8::default();
         }
+
+        // Set brightness for lower LED
+        let lower_brightness = (GLOBAL_BRIGHTNESS * 255.0 * (1.0 - fraction)) as u8;
+        data[lower_led] = RGB8 { r: lower_brightness, g: 0, b: lower_brightness/2 };
+
+        // Set brightness for upper LED
+        let upper_brightness = (GLOBAL_BRIGHTNESS * 255.0 * fraction) as u8;
+        data[upper_led] = RGB8 { r: upper_brightness, g: 0, b: upper_brightness/2 };
+
+        // Write the LED data
+        ws2812.write(&data).await;
     }
 }
