@@ -48,7 +48,7 @@ mod wifi;
 const WIFI_NETWORK: &str = "Bill Wi the Science Fi";
 const WIFI_PASSWORD: &str = "sciencerules";
 const NUM_LEDS: usize = 144;
-const GLOBAL_BRIGHTNESS: f32 = 0.1;
+const GLOBAL_BRIGHTNESS: f32 = 0.5;
 static CHANNEL: Channel<ThreadModeRawMutex, f32, 4> = Channel::new();
 
 // Define a new channel for sending arrays of u8s
@@ -173,6 +173,10 @@ async fn star_twinkle(sender: Sender<'static, ThreadModeRawMutex, [u8; NUM_LEDS]
     loop {
         let mut twinkle_data = [0u8; NUM_LEDS];
         for i in 0..NUM_LEDS {
+            if i > 36 && i < 72 {
+                state[i] = 0;
+                continue;
+            }
             if state[i] == 0 {
                 // This star is not lit
                 continue;
@@ -181,8 +185,7 @@ async fn star_twinkle(sender: Sender<'static, ThreadModeRawMutex, [u8; NUM_LEDS]
                 state[i] = 0;
                 twinkle_data[i] = 0;
                 continue;
-            }
-            else if state[i] > 127 {
+            } else if state[i] > 127 {
                 twinkle_data[i] = 255 - state[i];
             } else {
                 twinkle_data[i] = state[i];
@@ -234,7 +237,9 @@ async fn main(spawner: Spawner) {
         .unwrap();
 
     // Spawn the star_twinkle task
-    spawner.spawn(star_twinkle(TWINKLE_CHANNEL.sender())).unwrap();
+    spawner
+        .spawn(star_twinkle(TWINKLE_CHANNEL.sender()))
+        .unwrap();
 
     loop {
         let mut rx_buffer = [0; 8192];
@@ -386,20 +391,14 @@ async fn ws2812_task(
                 *led = RGB8::default();
             } else {
                 let blue = if i < 72 {
-                    ((i - 36) as f32 / 36.0 * 64.0) as u8
+                    ((i - 36) as f32 / 36.0 * 16.0) as u8
                 } else {
-                    ((108 - i) as f32 / 36.0 * 64.0) as u8
-                };
-
-                let redgreen = if i < 72 {
-                    ((i - 36) as f32 / 36.0 * 8.0) as u8
-                } else {
-                    ((108 - i) as f32 / 36.0 * 8.0) as u8
+                    ((108 - i) as f32 / 36.0 * 16.0) as u8
                 };
 
                 *led = RGB8 {
-                    r: redgreen,
-                    g: redgreen,
+                    r: 0,
+                    g: 0,
                     b: blue,
                 };
             }
