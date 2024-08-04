@@ -26,13 +26,13 @@ use embassy_rp::{
 };
 use embassy_sync::{
     blocking_mutex::raw::ThreadModeRawMutex,
-    channel::{Channel, Receiver},
+    channel::{Channel, Receiver, Sender},
 };
 use embassy_time::{Duration, Timer};
 use fixed::types::U24F8;
 use fixed_macro::fixed;
 use log::{error, info};
-use rand::RngCore;
+use rand::{Rng, RngCore};
 use reqwless::{
     client::{HttpClient, TlsConfig, TlsVerify},
     request::Method,
@@ -50,6 +50,9 @@ const WIFI_PASSWORD: &str = "sciencerules";
 const NUM_LEDS: usize = 144;
 const GLOBAL_BRIGHTNESS: f32 = 0.1;
 static CHANNEL: Channel<ThreadModeRawMutex, f32, 4> = Channel::new();
+
+// Define a new channel for sending arrays of u8s
+static TWINKLE_CHANNEL: Channel<ThreadModeRawMutex, [u8; NUM_LEDS], 4> = Channel::new();
 
 bind_interrupts!(struct Irqs {
     PIO1_IRQ_0 => InterruptHandler<PIO1>;
@@ -147,20 +150,64 @@ impl<'d, P: Instance, const S: usize, const N: usize> Ws2812<'d, P, S, N> {
     }
 }
 
-/// Input a value 0 to 255 to get a color value
-/// The colours are a transition r - g - b - back to r.
-fn wheel(mut wheel_pos: u8) -> RGB8 {
-    wheel_pos = 255 - wheel_pos;
-    let scale = 10; // Adjust this value to control brightness (lower value = dimmer)
-    if wheel_pos < 85 {
-        return ((255 - wheel_pos * 3) / scale, 0, (wheel_pos * 3) / scale).into();
+#[embassy_executor::task]
+async fn star_twinkle(sender: Sender<'static, ThreadModeRawMutex, [u8; NUM_LEDS], 4>) {
+    // stars twinkling always increment, but when sending the value via the sender numbers over 128 go back toward zero
+    // for example, if state has a 129, a 127 is sent instead. If 255 is sent, a 1 is sent instead.
+
+    let mut rng = RoscRng;
+    let mut state = [0u8; NUM_LEDS];
+
+    let star_probability = 0.1;
+
+    for i in 0..NUM_LEDS {
+        if rng.gen_bool(star_probability) {
+            // This star will be lit. Pick a random value 1 to 255 to set it to
+            let brightness = rng.gen_range(1..=255);
+            state[i] = brightness;
+        }
     }
-    if wheel_pos < 170 {
-        wheel_pos -= 85;
-        return (0, (wheel_pos * 3) / scale, (255 - wheel_pos * 3) / scale).into();
+
+    // Initialization done
+
+    loop {
+        let mut twinkle_data = [0u8; NUM_LEDS];
+        for i in 0..NUM_LEDS {
+            if state[i] == 0 {
+                // This star is not lit
+                continue;
+            }
+            if state[i] == 255 {
+                state[i] = 0;
+                twinkle_data[i] = 0;
+                continue;
+            }
+            else if state[i] > 127 {
+                twinkle_data[i] = 255 - state[i];
+            } else {
+                twinkle_data[i] = state[i];
+            }
+            twinkle_data[i] = twinkle_data[i].clamp(0, 16);
+        }
+
+        sender.send(twinkle_data).await;
+        Timer::after(Duration::from_millis(10)).await;
+
+        // Increment the state for each star
+        for i in 0..NUM_LEDS {
+            if state[i] == 0 {
+                // This star is not lit
+                if rng.gen_bool(0.005) {
+                    state[i] = 1;
+                }
+                continue;
+            }
+            if state[i] == 255 {
+                state[i] = 0;
+            }
+            state[i] += 1;
+        }
     }
-    wheel_pos -= 170;
-    ((wheel_pos * 3) / scale, (255 - wheel_pos * 3) / scale, 0).into()
 }
 
 #[embassy_executor::main]
@@ -177,8 +224,17 @@ async fn main(spawner: Spawner) {
     let mut rtc = Rtc::new(p.RTC);
 
     spawner
-        .spawn(ws2812_task(p.PIO1, p.DMA_CH1, p.PIN_4, CHANNEL.receiver()))
+        .spawn(ws2812_task(
+            p.PIO1,
+            p.DMA_CH1,
+            p.PIN_4,
+            CHANNEL.receiver(),
+            TWINKLE_CHANNEL.receiver(),
+        ))
         .unwrap();
+
+    // Spawn the star_twinkle task
+    spawner.spawn(star_twinkle(TWINKLE_CHANNEL.sender())).unwrap();
 
     loop {
         let mut rx_buffer = [0; 8192];
@@ -272,20 +328,20 @@ async fn main(spawner: Spawner) {
             }
         }
 
-        for _ in 0..3600 {
+        for _ in 0..360000 {
             let current_time = rtc.now().unwrap();
-            info!(
-                "Current RTC time: {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
-                current_time.year,
-                current_time.month,
-                current_time.day,
-                current_time.hour,
-                current_time.minute,
-                current_time.second
-            );
+            // info!(
+            //     "Current RTC time: {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+            //     current_time.year,
+            //     current_time.month,
+            //     current_time.day,
+            //     current_time.hour,
+            //     current_time.minute,
+            //     current_time.second
+            // );
             let time_fraction = calculate_time_fraction(current_time);
             CHANNEL.send(time_fraction).await;
-            Timer::after(Duration::from_secs(1)).await;
+            Timer::after(Duration::from_millis(10)).await;
         }
     }
 }
@@ -308,6 +364,7 @@ async fn ws2812_task(
     dma: DMA_CH1,
     pin: impl PioPin,
     time_scale_receiver: Receiver<'static, ThreadModeRawMutex, f32, 4>,
+    twinkle_receiver: Receiver<'static, ThreadModeRawMutex, [u8; NUM_LEDS], 4>,
 ) {
     let Pio {
         mut common, sm0, ..
@@ -322,25 +379,58 @@ async fn ws2812_task(
         let fraction = led_index - (lower_led as f32); // Calculate the fractional part
 
         // Reset all LEDs
-        for led in data.iter_mut() {
-            *led = RGB8::default();
+        // to imitate sky the leds 36 through 108 will be blue, with 36 up to 72 gradually getting lighter blue, then symmetrically darker from 73 to 108.
+        // everything from 0 to 35 will be black, and 109 to 143 will be black.
+        for (i, led) in data.iter_mut().enumerate() {
+            if i < 36 || i > 108 {
+                *led = RGB8::default();
+            } else {
+                let blue = if i < 72 {
+                    ((i - 36) as f32 / 36.0 * 64.0) as u8
+                } else {
+                    ((108 - i) as f32 / 36.0 * 64.0) as u8
+                };
+
+                let redgreen = if i < 72 {
+                    ((i - 36) as f32 / 36.0 * 8.0) as u8
+                } else {
+                    ((108 - i) as f32 / 36.0 * 8.0) as u8
+                };
+
+                *led = RGB8 {
+                    r: redgreen,
+                    g: redgreen,
+                    b: blue,
+                };
+            }
         }
 
         // Set brightness for lower LED
         let lower_brightness = (GLOBAL_BRIGHTNESS * 255.0 * (1.0 - fraction)) as u8;
         data[lower_led] = RGB8 {
             r: lower_brightness,
-            g: 0,
-            b: lower_brightness / 2,
+            g: lower_brightness,
+            b: 0,
         };
 
         // Set brightness for upper LED
         let upper_brightness = (GLOBAL_BRIGHTNESS * 255.0 * fraction) as u8;
         data[upper_led] = RGB8 {
             r: upper_brightness,
-            g: 0,
-            b: upper_brightness / 2,
+            g: upper_brightness,
+            b: 0,
         };
+
+        let twinkle_values = twinkle_receiver.receive().await;
+        for i in 0..NUM_LEDS {
+            if twinkle_values[i] > 0 && data[i].r == 0 {
+                data[i] = RGB8 {
+                    r: twinkle_values[i] as u8,
+                    g: twinkle_values[i] as u8,
+                    b: twinkle_values[i] as u8,
+                };
+            }
+        }
 
         // Write the LED data
         ws2812.write(&data).await;
