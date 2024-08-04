@@ -12,10 +12,23 @@ use embassy_net::{
     tcp::client::{TcpClient, TcpClientState},
 };
 use embassy_rp::{
-    bind_interrupts, clocks::{self, RoscRng}, dma::{AnyChannel, Channel as DmaChannel}, into_ref, peripherals::{DMA_CH1, PIO1}, pio::{Common, Config, FifoJoin, Instance, InterruptHandler, Pio, PioPin, ShiftConfig, ShiftDirection, StateMachine}, rtc::{DayOfWeek, Rtc}, Peripheral, PeripheralRef
+    bind_interrupts,
+    clocks::{self, RoscRng},
+    dma::{AnyChannel, Channel as DmaChannel},
+    into_ref,
+    peripherals::{DMA_CH1, PIO1},
+    pio::{
+        Common, Config, FifoJoin, Instance, InterruptHandler, Pio, PioPin, ShiftConfig,
+        ShiftDirection, StateMachine,
+    },
+    rtc::{DayOfWeek, Rtc},
+    Peripheral, PeripheralRef,
 };
-use embassy_sync::{blocking_mutex::raw::ThreadModeRawMutex, channel::{Channel, Receiver}};
-use embassy_time::{Duration, Timer, Ticker};
+use embassy_sync::{
+    blocking_mutex::raw::ThreadModeRawMutex,
+    channel::{Channel, Receiver},
+};
+use embassy_time::{Duration, Ticker, Timer};
 use fixed::types::U24F8;
 use fixed_macro::fixed;
 use log::{error, info};
@@ -121,7 +134,9 @@ impl<'d, P: Instance, const S: usize, const N: usize> Ws2812<'d, P, S, N> {
         // Precompute the word bytes from the colors
         let mut words = [0u32; N];
         for i in 0..N {
-            let word = (u32::from(colors[i].g) << 24) | (u32::from(colors[i].r) << 16) | (u32::from(colors[i].b) << 8);
+            let word = (u32::from(colors[i].g) << 24)
+                | (u32::from(colors[i].r) << 16)
+                | (u32::from(colors[i].b) << 8);
             words[i] = word;
         }
 
@@ -138,26 +153,14 @@ fn wheel(mut wheel_pos: u8) -> RGB8 {
     wheel_pos = 255 - wheel_pos;
     let scale = 10; // Adjust this value to control brightness (lower value = dimmer)
     if wheel_pos < 85 {
-        return (
-            (255 - wheel_pos * 3) / scale,
-            0,
-            (wheel_pos * 3) / scale
-        ).into();
+        return ((255 - wheel_pos * 3) / scale, 0, (wheel_pos * 3) / scale).into();
     }
     if wheel_pos < 170 {
         wheel_pos -= 85;
-        return (
-            0,
-            (wheel_pos * 3) / scale,
-            (255 - wheel_pos * 3) / scale
-        ).into();
+        return (0, (wheel_pos * 3) / scale, (255 - wheel_pos * 3) / scale).into();
     }
     wheel_pos -= 170;
-    (
-        (wheel_pos * 3) / scale,
-        (255 - wheel_pos * 3) / scale,
-        0
-    ).into()
+    ((wheel_pos * 3) / scale, (255 - wheel_pos * 3) / scale, 0).into()
 }
 
 #[embassy_executor::main]
@@ -173,7 +176,9 @@ async fn main(spawner: Spawner) {
     let seed = rng.next_u64();
     let mut rtc = Rtc::new(p.RTC);
 
-    spawner.spawn(ws2812_task(p.PIO1, p.DMA_CH1, p.PIN_4, CHANNEL.receiver())).unwrap();
+    spawner
+        .spawn(ws2812_task(p.PIO1, p.DMA_CH1, p.PIN_4, CHANNEL.receiver()))
+        .unwrap();
 
     loop {
         let mut rx_buffer = [0; 8192];
@@ -289,18 +294,24 @@ fn calculate_time_fraction(current_time: embassy_rp::rtc::DateTime) -> f32 {
     const SECONDS_IN_A_DAY: u32 = 86400; // 24 * 60 * 60
     const TIME_SCALE: u32 = 1;
 
-    let seconds_since_midnight = (current_time.hour as u32 * 3600) +
-                                 (current_time.minute as u32 * 60) +
-                                 (current_time.second as u32);
+    let seconds_since_midnight = (current_time.hour as u32 * 3600)
+        + (current_time.minute as u32 * 60)
+        + (current_time.second as u32);
     let fraction_of_day = seconds_since_midnight as f32 / SECONDS_IN_A_DAY as f32;
-    
+
     (fraction_of_day * TIME_SCALE as f32) % 1.0
 }
 
-
 #[embassy_executor::task]
-async fn ws2812_task(pio: PIO1, dma: DMA_CH1, pin: impl PioPin, time_scale_receiver: Receiver<'static, ThreadModeRawMutex, f32, 4>) {
-    let Pio { mut common, sm0, .. } = Pio::new(pio, Irqs);
+async fn ws2812_task(
+    pio: PIO1,
+    dma: DMA_CH1,
+    pin: impl PioPin,
+    time_scale_receiver: Receiver<'static, ThreadModeRawMutex, f32, 4>,
+) {
+    let Pio {
+        mut common, sm0, ..
+    } = Pio::new(pio, Irqs);
     let mut data = [RGB8::default(); NUM_LEDS];
     let mut ws2812 = Ws2812::new(&mut common, sm0, dma, pin);
     loop {
@@ -317,11 +328,19 @@ async fn ws2812_task(pio: PIO1, dma: DMA_CH1, pin: impl PioPin, time_scale_recei
 
         // Set brightness for lower LED
         let lower_brightness = (GLOBAL_BRIGHTNESS * 255.0 * (1.0 - fraction)) as u8;
-        data[lower_led] = RGB8 { r: lower_brightness, g: 0, b: lower_brightness/2 };
+        data[lower_led] = RGB8 {
+            r: lower_brightness,
+            g: 0,
+            b: lower_brightness / 2,
+        };
 
         // Set brightness for upper LED
         let upper_brightness = (GLOBAL_BRIGHTNESS * 255.0 * fraction) as u8;
-        data[upper_led] = RGB8 { r: upper_brightness, g: 0, b: upper_brightness/2 };
+        data[upper_led] = RGB8 {
+            r: upper_brightness,
+            g: 0,
+            b: upper_brightness / 2,
+        };
 
         // Write the LED data
         ws2812.write(&data).await;
